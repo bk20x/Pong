@@ -1,4 +1,4 @@
-import netty
+import lib/netty
 import raylib, raygui
 import threading/channels
 import std/[json, strutils]
@@ -80,8 +80,6 @@ proc serverProc (ipnPort: (string, int)) =
           echo "Exiting Server Thread"
           server.socket.close()
           break
-          
-
   except CatchableError as e:
     replies.send Msg(kind: mkError, err: e.msg)
 
@@ -113,9 +111,9 @@ proc drawTextCentered (text: string; screenW, screenH, scale: float32; y=screenH
     textLen  = measureText(text, scaledSize)
   drawText(text, int32(screenW/2 - textLen/2), y.int32, scaledSize, color)
 
-proc runGame (): void
+proc runGame: void
 
-proc hostOrJoinGame =
+proc hostOrJoinGame() =
   var 
     ip        = newStringOfCap(15) # ipv4 lengths. no ipv6 (no one is typing that shit)
     port      = newStringOfCap(5)
@@ -127,7 +125,6 @@ proc hostOrJoinGame =
       screenW = getRenderWidth().float32
       screenH = getRenderHeight().float32
       scale   = min(screenW / GameWidth, screenH / GameHeight)
-
     proc tryHostOrJoin =
       var portNo: int
       let 
