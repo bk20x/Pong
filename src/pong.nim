@@ -218,7 +218,7 @@ proc hostOrJoinGame =
         if errorMsg != "":
           drawTextCentered(errorMsg, screenW, screenH, scale, y=screenH/2 - 60*scale, color = Black)
       else:
-        discard 
+        discard # Loop breaks and `runGame` is called. it will naturally call THIS procedure again to restart (if the player wants to restart)
   runGame()
     
 
