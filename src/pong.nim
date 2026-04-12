@@ -67,21 +67,23 @@ var
   gameState: GameState = gsMenuMain
 
 proc serverProc (ipnPort: (string, int)) =
+  var 
+    server: Reactor
+    message: Msg
   try:
-    var 
-      server = newReactor(ipnPort[0], ipnPort[1])
-      message: Msg
-    while true:
-      server.tick()
-      for con in server.newConnections:
-        echo "Connection from: ", con.address
-      if msgs.tryRecv(message):
-        if message.kind == mkQuit:
-          echo "Exiting Server Thread"
-          server.socket.close()
-          break
-  except CatchableError as e:
+    server = newReactor(ipnPort[0], ipnPort[1])
+  except CatchableError as e: # this should be only exception here
     replies.send Msg(kind: mkError, err: e.msg)
+    return
+  while true:
+    server.tick()
+    for con in server.newConnections:
+      echo "Connection from: ", con.address
+    if msgs.tryRecv(message):
+      if message.kind == mkQuit:
+        echo "Exiting Server Thread"
+        server.socket.close()
+        break
 
 
 proc startServerThread(ip: string; port: int) = 
@@ -92,13 +94,14 @@ proc clientProc (ipnPort: (string, int)) =
     client = newReactor()
     conn = client.connect(ipnPort[0], ipnPort[1])
     message: Msg
+  defer:
+    client.disconnect(conn)
+    client.socket.close()
   while true:
     client.tick()
     if msgs.tryRecv(message):
       if message.kind == mkQuit:
-        echo "Exiting Client Thread"
-        client.disconnect(conn)
-        client.socket.close()
+        echo "Exiting Client Thread"   
         break
   
 proc startClientThread(ip: string; port: int) =
@@ -113,7 +116,7 @@ proc drawTextCentered (text: string; screenW, screenH, scale: float32; y=screenH
 
 proc runGame: void
 
-proc hostOrJoinGame() =
+proc hostOrJoinGame =
   var 
     ip        = newStringOfCap(15) # ipv4 lengths. no ipv6 (no one is typing that shit)
     port      = newStringOfCap(5)
@@ -125,6 +128,7 @@ proc hostOrJoinGame() =
       screenW = getRenderWidth().float32
       screenH = getRenderHeight().float32
       scale   = min(screenW / GameWidth, screenH / GameHeight)
+
     proc tryHostOrJoin =
       var portNo: int
       let 
@@ -197,6 +201,7 @@ proc hostOrJoinGame() =
         if button(rect(0, 0, buttonW/2, buttonW/4), "< Back"):
           choseIp   = false
           chosePort = false
+          errorMsg  = ""
           msgs.send Msg(kind: mkQuit)
           netThread.joinThread()
           gameState = gsMenuMain
