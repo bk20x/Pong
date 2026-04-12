@@ -311,6 +311,7 @@ proc main =
   setTargetFPS(60)
   hostOrJoinGame()
   if netThread.running:
+    msgs.send Msg(kind: mkQuit)
     netThread.joinThread()
 
 
