@@ -77,7 +77,7 @@ proc serverProc (ipnPort: (string, int)) =
         echo "Connection from: ", con.address
       if msgs.tryRecv(message):
         if message.kind == mkQuit:
-          echo "Exiting Server thread"
+          echo "Exiting Server Thread"
           server.socket.close()
           break
           
@@ -93,10 +93,15 @@ proc clientProc (ipnPort: (string, int)) =
   var 
     client = newReactor()
     conn = client.connect(ipnPort[0], ipnPort[1])
+    message: Msg
   while true:
     client.tick()
-    client.send(conn, "yo")
-    sleep 500
+    if msgs.tryRecv(message):
+      if message.kind == mkQuit:
+        echo "Exiting Client Thread"
+        client.disconnect(conn)
+        client.socket.close()
+        break
   
 proc startClientThread(ip: string; port: int) =
   createThread(netThread, clientProc, (ip, port))
@@ -122,20 +127,19 @@ proc hostOrJoinGame =
       screenW = getRenderWidth().float32
       screenH = getRenderHeight().float32
       scale   = min(screenW / GameWidth, screenH / GameHeight)
+
     proc tryHostOrJoin =
       var portNo: int
       let 
         inputWidth  = 192*scale      
         inputHeight = inputWidth/4
         fontSize    = int32(64*scale)
-
       if button(rect(screenW / 2 - inputWidth/2 - inputWidth/8, screenH/2 - inputWidth/4, inputWidth/8, inputWidth/8), "<"):
         if choseIp: 
           choseIp = false 
         else: 
           gameState = gsMenuMain
         return       
-
       if not choseIp:
         drawText("IP:", int32(screenW/2 - inputWidth/4), int32(screenH/2 - inputWidth/2 - 32), fontSize, Black)
         if errorMsg.len != 0:
@@ -193,7 +197,6 @@ proc hostOrJoinGame =
         isHost = gameState == gsMenuHosting
         tryHostOrJoin()
       of gsHostingWaiting, gsJoiningWaiting:
-        gameState = gsHostingConnected
         if button(rect(0, 0, buttonW/2, buttonW/4), "< Back"):
           choseIp   = false
           chosePort = false
@@ -202,8 +205,16 @@ proc hostOrJoinGame =
           gameState = gsMenuMain
         var msg: Msg
         let recvd = replies.tryRecv(msg)
-          
-        drawTextCentered("Waiting for someone to join...", screenW, screenH, scale, color = Black)
+        if recvd:
+          case msg.kind
+          of mkError:
+            errorMsg = msg.err
+          else:
+            assert(false, "Todo")
+        if gameState == gsHostingWaiting:
+          drawTextCentered("Waiting for someone to join...", screenW, screenH, scale, color = Black)
+        else:
+          drawTextCentered("Waiting for a response from peer...", screenW, screenH, scale, color = Black)
         if errorMsg != "":
           drawTextCentered(errorMsg, screenW, screenH, scale, y=screenH/2 - 60*scale, color = Black)
       else:
