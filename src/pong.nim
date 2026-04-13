@@ -63,6 +63,13 @@ func rect (x=0f, y=0f, width=0f, height=0f): auto =
   Rectangle(x: x, y: y, width: width, height: height)
 func rect (player: Player): auto = 
   rect(player.pos.x, player.pos.y, PlayerWidth, PlayerHeight)
+  
+proc drawTextCentered (text: string; screenW, screenH, scale: float32; y=screenH/2; color=Black) =
+  let 
+    maxSize  = screenW-40*scale
+    scaledSize  = int32 min(32 * scale, (maxSize / text.len.float32) * 1.5)
+    textLen  = measureText(text, scaledSize)
+  drawText(text, int32(screenW/2 - textLen/2), y.int32, scaledSize, color)
 
 template js (m: Msg): string =
   $(%*m)
@@ -86,11 +93,11 @@ proc serverProc(ipnPort: (string, int)) =
     message: Msg
     state = nsHandshake
   
-  echo fmt"Starting Server on {ipnPort[0]}:{ipnPort[1]}" 
-  
   try:
     server = newReactor(ipnPort[0], ipnPort[1])
+    echo fmt"Server started on {ipnPort[0]}:{ipnPort[1]}" 
   except CatchableError as e:
+    echo fmt"Error starting server: {e.msg}"
     replies.send Msg(kind: mkError, err: e.msg)
     return
 
@@ -132,6 +139,7 @@ proc serverProc(ipnPort: (string, int)) =
 proc startServerThread(ip: string; port: int) = 
   createThread(netThread, serverProc, (ip, port))
     
+
 proc clientProc(ipnPort: (string, int)) =
   var 
     client = newReactor()
@@ -183,18 +191,9 @@ proc clientProc(ipnPort: (string, int)) =
       else:
         discard
 
-
-    
-
 proc startClientThread(ip: string; port: int) =
   createThread(netThread, clientProc, (ip, port))
 
-proc drawTextCentered (text: string; screenW, screenH, scale: float32; y=screenH/2; color=Black) =
-  let 
-    maxSize  = screenW-40*scale
-    scaledSize  = int32 min(32 * scale, (maxSize / text.len.float32) * 1.5)
-    textLen  = measureText(text, scaledSize)
-  drawText(text, int32(screenW/2 - textLen/2), y.int32, scaledSize, color)
 
 proc runGame: void
 
@@ -287,6 +286,7 @@ proc hostOrJoinGame =
           msgs.send Msg(kind: mkQuit)
           netThread.joinThread()
           gameState = gsMenuMain
+          continue # the button is picking up multiple hits i think. if i dont continue it seems to send multiple mkQuit messages which register the next time the server is started
         var msg: Msg
         let recvd = replies.tryRecv(msg)
         if recvd:
