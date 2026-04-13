@@ -113,8 +113,7 @@ proc serverProc(ipnPort: (string, int)) =
         echo "Exiting Server thread"
         server.socket.close()
         replies.send Msg(kind: mkQuit)
-        sleep 10
-        break
+        return
       elif message.kind == mkUpdate:
         # send game stat to client
         for conn in server.connections:
