@@ -1,8 +1,9 @@
 import lib/netty
 import raylib, raygui
 import threading/channels
-import std/[json, strutils]
+import std/[json, strutils, strformat]
 from std/os  import sleep
+from std/times import epochTime
 from std/net import parseIpAddress, close
 type
   Player = object
@@ -17,8 +18,11 @@ type
   MsgKind = enum 
     mkError,
     mkConnect,
+    mkConnected,
+    mkConnectAccept,
     mkDisconnect,
     mkQuit,
+    mkReady,
     mkUpdate
 
   Msg = object
@@ -40,6 +44,8 @@ type
     gsJoiningWaiting, 
     gsJoiningConnected
 
+
+
 const
   GameWidth       = 600
   GameHeight      = 600
@@ -58,52 +64,128 @@ func rect (x=0f, y=0f, width=0f, height=0f): auto =
 func rect (player: Player): auto = 
   rect(player.pos.x, player.pos.y, PlayerWidth, PlayerHeight)
 
+template js (m: Msg): string =
+  $(%*m)
 
 var 
   isHost:    bool
   netThread: Thread[(string, int)]
-  msgs:      Chan[Msg] = newChan[Msg]()
-  replies:   Chan[Msg] = newChan[Msg]()
+  msgs:      Chan[Msg] = newChan[Msg]() # messages sent from the main thread (game thread) to the server or client
+  replies:   Chan[Msg] = newChan[Msg]() # replies to the main thread from the server or client
   gameState: GameState = gsMenuMain
 
-proc serverProc (ipnPort: (string, int)) =
+type NetworkState = enum 
+  nsHandshake, 
+  nsConnected, 
+  nsConnectedInGame,
+  nsNotifyDisconnect
+
+proc serverProc(ipnPort: (string, int)) =
   var 
     server: Reactor
     message: Msg
+    state = nsHandshake
+  
+  echo fmt"Starting Server on {ipnPort[0]}:{ipnPort[1]}" 
+  
   try:
     server = newReactor(ipnPort[0], ipnPort[1])
-  except CatchableError as e: # this should be only exception here
+  except CatchableError as e:
     replies.send Msg(kind: mkError, err: e.msg)
     return
+
   while true:
-    server.tick()
-    for con in server.newConnections:
-      echo "Connection from: ", con.address
+    server.tick()     
+    # recv from main
     if msgs.tryRecv(message):
       if message.kind == mkQuit:
-        echo "Exiting Server Thread"
+        echo "Server sending mkQuit to clients"
+        for conn in server.connections:
+          server.send(conn, js Msg(kind: mkQuit))
+        for _ in 0..100: server.tick() # flush it. this is janky lol but it works!
+        echo "Exiting Server thread"
         server.socket.close()
+        replies.send Msg(kind: mkQuit)
+        sleep 10
         break
+      elif message.kind == mkUpdate:
+        # send game stat to client
+        for conn in server.connections:
+          server.send(conn, js message)
 
+    # talk to client
+    for msg in server.messages:
+      let m = parseJson(msg.data).to(Msg)
+      if state == nsHandshake and m.kind == mkConnect:
+        echo "Client sent mkConnect; sending mkConnectAccept"
+        server.send(msg.conn, js Msg(kind: mkConnectAccept))
+        replies.send Msg(kind: mkConnected)
+        state = nsConnected
+      elif state == nsConnected and m.kind == mkUpdate:
+        replies.send m
+      elif m.kind == mkDisconnect:
+        echo "Client Disconnected, Exiting server thread"
+        server.socket.close()
+        replies.send Msg(kind: mkQuit)
+        return
 
 proc startServerThread(ip: string; port: int) = 
   createThread(netThread, serverProc, (ip, port))
     
-proc clientProc (ipnPort: (string, int)) =
+proc clientProc(ipnPort: (string, int)) =
   var 
     client = newReactor()
     conn = client.connect(ipnPort[0], ipnPort[1])
-    message: Msg
+    message: Msg 
+    state = nsHandshake
+    lastSent = 0.0
   defer:
     client.disconnect(conn)
     client.socket.close()
+
   while true:
     client.tick()
-    if msgs.tryRecv(message):
+    # recv from main 
+    if msgs.tryRecv(message): 
       if message.kind == mkQuit:
-        echo "Exiting Client Thread"   
-        break
-  
+        echo "Client sending mkDisconnect"
+        client.send(conn, js Msg(kind: mkDisconnect))
+        for _ in 0..100: client.tick()
+        echo "Exiting Client Thread"
+        replies.send Msg(kind: mkQuit)
+        return
+      elif message.kind == mkUpdate:
+        if state == nsConnected:
+          client.send(conn, js message)
+
+    # handshake
+    if state == nsHandshake and epochTime() - lastSent > 1.0:
+      echo "Client Sending Connect..."
+      client.send(conn, js Msg(kind: mkConnect))
+      lastSent = epochTime()
+      sleep 10
+
+    # talk to server
+    for msg in client.messages:
+      let m = parseJson(msg.data).to(Msg)
+      case m.kind
+      of mkConnectAccept:
+        if state == nsHandshake:
+          echo "Client Connected"
+          state = nsConnected
+          replies.send Msg(kind: mkConnected)
+      of mkUpdate:
+        replies.send m
+      of mkQuit:
+        echo "Server sent mkQuit. Exiting Client Thread."
+        replies.send Msg(kind: mkQuit)
+        return 
+      else:
+        discard
+
+
+    
+
 proc startClientThread(ip: string; port: int) =
   createThread(netThread, clientProc, (ip, port))
 
@@ -211,9 +293,11 @@ proc hostOrJoinGame =
           case msg.kind
           of mkError:
             errorMsg = msg.err
+          of mkConnected:
+            gameState = if isHost: gsHostingConnected else: gsJoiningConnected
           else:
-            assert(false, "Todo")
-        if gameState == gsHostingWaiting:
+            discard
+        if isHost:
           drawTextCentered("Waiting for someone to join...", screenW, screenH, scale, color = Black)
         else:
           drawTextCentered("Waiting for a response from peer...", screenW, screenH, scale, color = Black)
@@ -241,60 +325,92 @@ proc runGame =
              vec2(rival.pos.x + PlayerWidth/2, rival.pos.y + PlayerHeight*2),
       dir: vec2(0, 1)
     )
-  var goToMenu = false
-  while not windowShouldClose():
+  var 
+    msg: Msg
+    running = true
+    quitToMenu = false
+
+  while running:
     let 
       delta   = getFrameTime()
       screenW = getRenderWidth().float32
       screenH = getRenderHeight().float32
       scale   = min(screenW / GameWidth, screenH / GameHeight)
+    
     camera.zoom   = scale
     camera.offset = vec2(
       x = (screenW - (GameWidth  * scale)) * 0.5f,
       y = (screenH - (GameHeight * scale)) * 0.5f
     )
+
     block updatePlayer:
       player.dir = 0
       if isKeyDown(A) or isKeyDown(Left):
         player.dir -= 1
       elif isKeyDown(D) or isKeyDown(Right):
         player.dir += 1
-      let newX = clamp(player.pos.x + player.dir.float32*delta*PlayerSpeed, 0, GameWidth - PlayerWidth)
+      let newX = clamp(player.pos.x + player.dir.float32 * delta * PlayerSpeed, 0, GameWidth - PlayerWidth)
       player.pos.x = newX
 
-    block updateBallX:
-      if isHost:
-        let newX = ball.pos.x + ball.dir.x*delta*BallSpeed
+    if isHost:
+      block updateBallX:
+        let newX = ball.pos.x + ball.dir.x * delta * BallSpeed
         if newX - BallRadius/2 < 0 or (newX + BallRadius) > GameWidth:
           ball.dir.x = -ball.dir.x
-          break updateBallX
         elif checkCollisionCircleRec(vec2(newX, ball.pos.y), BallRadius, player.rect):
           ball.dir.x = -ball.dir.x
-          break updateBallX
         elif checkCollisionCircleRec(vec2(newX, ball.pos.y), BallRadius, rival.rect):
           ball.dir.x = -ball.dir.x
-          break updateBallX
-        ball.pos.x = newX
+        else:
+          ball.pos.x = newX
 
-    block updateBallY:
-      if isHost:
-        let newY = ball.pos.y + ball.dir.y*delta*BallSpeed
+      block updateBallY:
+        let newY = ball.pos.y + ball.dir.y * delta * BallSpeed
         if newY - BallRadius/2 < 0 or (newY + BallRadius) > GameHeight:
           ball.dir.y = -ball.dir.y
-          break updateBallY
         elif checkCollisionCircleRec(vec2(ball.pos.x, newY), BallRadius, player.rect):
           if player.dir != 0: ball.dir.x = player.dir.float32
           ball.dir.y = -ball.dir.y
-          break updateBallY 
         elif checkCollisionCircleRec(vec2(ball.pos.x, newY), BallRadius, rival.rect):
-          if player.dir != 0: ball.dir.x = rival.dir.float32
+          if rival.dir != 0: ball.dir.x = rival.dir.float32 
           ball.dir.y = -ball.dir.y
-          break updateBallY 
-        ball.pos.y = newY
-    if isKeyPressed F:
-      goToMenu  = true
-      gameState = gsMenuMain
-      break
+        else:
+          ball.pos.y = newY
+      
+      msgs.send Msg(kind: mkUpdate, playerStat: player, ballStat: ball)
+    else:
+      msgs.send Msg(kind: mkUpdate, playerStat: player)
+      
+
+    while replies.tryRecv(msg):
+      case msg.kind
+      of mkQuit:
+        running = false 
+      of mkUpdate:
+        if isHost:
+          # mirror client 
+          rival.pos.x = GameWidth - msg.playerStat.pos.x - PlayerWidth
+          rival.pos.y = GameHeight - msg.playerStat.pos.y - PlayerHeight 
+          # flip dir for collision 
+          rival.dir = -msg.playerStat.dir
+        else:
+          # mirror host 
+          rival.pos.x = GameWidth - msg.playerStat.pos.x - PlayerWidth
+          rival.pos.y = GameHeight - msg.playerStat.pos.y - PlayerHeight
+          rival.dir = -msg.playerStat.dir
+          # mirror ball
+          ball.pos.x = GameWidth - msg.ballStat.pos.x
+          ball.pos.y = GameHeight - msg.ballStat.pos.y
+      else: discard
+
+
+    if windowShouldClose():
+      msgs.send Msg(kind: mkQuit)
+    
+    if isKeyPressed Q:
+      msgs.send Msg(kind: mkQuit)
+      quitToMenu = true
+
     drawing:
       clearBackground Gray
       mode2D(camera):
@@ -302,19 +418,22 @@ proc runGame =
         drawRectangle(player.rect, DarkBlue)
         drawRectangle(rival.rect,  DarkBlue)
         drawCircle(ball.pos, BallRadius, Maroon)
-      drawText($getFPS(), 0, 0, 32*scale.int32, Green)
-  if goToMenu:
-    msgs.send Msg(kind: mkQuit)
+      drawText($getFPS(), 0, 0, (32 * scale).int32, Green)
+
+  if netThread.running:
+    netThread.joinThread()
+  
+  if quitToMenu:
+    gameState = gsMenuMain
     hostOrJoinGame()
+
+
 
 proc main = 
   setConfigFlags(flags WindowResizable)
   initWindow(600, 800, "Prison Pong!"); defer: closeWindow()
   setTargetFPS(60)
   hostOrJoinGame()
-  if netThread.running:
-    msgs.send Msg(kind: mkQuit)
-    netThread.joinThread()
 
 
 main()
