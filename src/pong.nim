@@ -305,7 +305,8 @@ proc hostOrJoinGame =
           drawTextCentered(errorMsg, screenW, screenH, scale, y=screenH/2 - 60*scale, color = Black)
       else:
         discard # Loop breaks and `runGame` is called. it will naturally call THIS procedure again to restart (if the player wants to restart)
-  runGame()
+  if not windowShouldClose():
+    runGame()
     
 
       
@@ -328,7 +329,7 @@ proc runGame =
   var 
     msg: Msg
     running = true
-    quitToMenu = false
+    quitToMenu = true
 
   while running:
     let 
@@ -405,12 +406,12 @@ proc runGame =
 
 
     if windowShouldClose():
+      quitToMenu = false
       msgs.send Msg(kind: mkQuit)
     
     if isKeyPressed Q:
       msgs.send Msg(kind: mkQuit)
-      quitToMenu = true
-
+    
     drawing:
       clearBackground Gray
       mode2D(camera):
