@@ -283,10 +283,10 @@ proc hostOrJoinGame =
           choseIp   = false
           chosePort = false
           errorMsg  = ""
-          msgs.send Msg(kind: mkQuit)
-          netThread.joinThread()
+          if netThread.running(): # if there was an error starting the server this should be false bc it returns immediately
+            msgs.send Msg(kind: mkQuit) # only send quit if its running. otherwise if you press back and try to restart the server thread it will immediately be hit with mkQuit
+            netThread.joinThread()
           gameState = gsMenuMain
-          continue # the button is picking up multiple hits i think. if i dont continue it seems to send multiple mkQuit messages which register the next time the server is started
         var msg: Msg
         let recvd = replies.tryRecv(msg)
         if recvd:
